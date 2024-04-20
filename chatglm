@@ -1,0 +1,211 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+from zhipuai import ZhipuAI
+import os
+import sys
+import distro
+import os
+import json
+import math
+import time
+import select
+
+
+class ChatGLM:
+    def __init__(self, api_key=None, model=None, language='auto', allow_pipe=False):
+        """
+        Initialize ChatGLM class
+
+        :param api_key: API key for ChatGLM
+        :param model: Model for ChatGLM
+        :param language: Reply language for ChatGLM, default is automatically.
+        :param allow_pipe: Allow user to use PIPE in program.
+        """
+        if not api_key:
+            api_key = os.environ.get("ZHIPUAI_API_KEY")
+        self.api_key = api_key
+        if not model:
+            self.model = "glm-3-turbo"
+        else:
+            self.model = model
+        if language.lower() == 'auto':
+            try:
+                tty_name = os.ttyname(0)
+            # If user want to use PIPE, OSError will be raised.
+            except OSError:
+                tty_name = ""
+                print("Warning: If you are running in TTY, please use -t, --tty to prevent display exceptions.")
+            if "tty" in tty_name:
+                self.language = "en_US"
+            else:
+                self.language = os.environ.get("LANG")
+        else:
+            self.language = language
+        self.allow_pipe = allow_pipe
+        self.client = ZhipuAI(api_key=api_key)
+        self.linux_distro = distro.name()
+        self.username = os.getlogin()
+        self.system_prompt = f"""I'm {self.username}, a user of {self.linux_distro}.
+        You are a helpful Linux smart assistant in {self.linux_distro}.
+        You can solve Linux related questions for me.
+        Please be as concise as possible with your answer to save the Token consumed by this call.
+        Please reply me in {self.language}.
+        """
+        
+    
+    def ask(self, messages):
+        """
+        Ask for ChatGLM
+
+        :param messages: Prompts and chat record.
+        :return: Messages after ChatGLM reply.
+        """
+        response = self.client.chat.completions.create(
+            model=self.model,
+            messages=messages,
+            stream=True
+        )
+        reply = ""
+        for chunk in response:
+            reply += chunk.choices[0].delta.content
+            print(chunk.choices[0].delta.content, end="")
+        messages.append({"role": "assistant", "content": reply})
+        return messages
+
+    def answer(self, question):
+        """
+        Answer a question with ChatGLM
+
+        :param question: Question for reply
+        :return: Reply from ChatGLM.
+        """
+        messages = [
+            {
+                "role": "system",
+                "content": self.system_prompt
+            },
+            {
+                "role": "user",
+                "content": question
+            }
+        ]
+        print("\n\n")
+        messages = self.ask(messages)
+        return messages[-1]['content']
+    
+    def chat(self, chat_history=None):
+        """
+        Start chat with ChatGLM
+
+        :param chat_history: Show chat history or not (default is No history)
+        :return: Messages: Chat History.
+        """
+        # If user want to show chat history, append it to the message list and send it to ChatGLM for reply.
+        if chat_history:
+            messages = chat_history
+        else:
+            messages = [
+                {
+                    "role": "system",
+                    "content": self.system_prompt
+                }
+            ]
+        # After the messages list is initialized, start the chat loop.
+        while True:
+            # Get user input, and append it to the messages list, and then send the messages list to ChatGLM for reply.
+            question = input("\033[32m[User]: \033[0m")
+            # Check if the user input is "exit", if so, break the loop.
+            if question.lower() == "exit":
+                break
+            # Append the user input to the messages list.
+            messages.append(
+                {
+                    "role": "user",
+                    "content": question
+                }
+            )
+            # Send the messages list to ChatGLM for reply.
+            print("\033[32m[ChatGLM]: \033[0m", end="")
+            messages = self.ask(messages)
+            print("\n")
+        
+        return messages
+
+def exec_chatglm(params):
+    tty_param = ['-t', 'tty', '--tty']
+    if any(map(params.__contains__, tty_param)):
+        # If user want to use TTY mode, display language will be English, in order to prevents display exceptions in Chinese, Japanese, Korean and other languages.
+        chatglm = ChatGLM(language='en_US', allow_pipe=True)
+    else:
+        chatglm = ChatGLM(language='auto', allow_pipe=True)
+    chat_param = ['-c', 'chat', '--chat']
+    save_param = ['-s', 'save', '--save']
+    # Read messages from PIPE if user want to use PIPE.
+    pipe_messages = ""
+    if not sys.stdin.isatty():
+        while True:
+            # Read messages from PIPE.
+            readable, _, _ = select.select([sys.stdin], [], [], 0.1)
+            if readable:
+                line = sys.stdin.readline()
+                if line:
+                    pipe_messages += line
+                else:
+                    # Redirect the input stream, and then continue to read the input stream.
+                    sys.stdin = open("/dev/tty")
+                    break
+    if any(map(params.__contains__, chat_param)):
+        if any(map(params.__contains__, save_param)):
+            # Make a directory if it's not exist to save the chat history.
+            home_directory = os.path.expanduser("~")
+            chat_history_directory = os.path.join(home_directory + "/.cache/chatglm")
+            # Check if ~/.cache/chatglm is a file.
+            if os.path.isfile(chat_history_directory):
+                print(f"ChatGLM: {chat_history_directory} is a file, please backup and remove it, and then you can retry it.")
+                sys.exit(1)
+            # Save the chat history to ~/.cache/chatglm/chat_history_yyyymmddHHMMSS.json
+            filename = f"chat_history_{time.strftime('%Y%m%d%H%M%S', time.localtime())}.json"
+            if not os.path.exists(chat_history_directory):
+                os.makedirs(chat_history_directory)
+            if not sys.stdin.isatty():
+                # If user want to save the chat history, send the chat history using PIPE, user can run using `cat /path/to/chat_history_yyyymmddHHMMSS.json | chatglm -c -s`
+                result = chatglm.chat(chat_history=json.loads(pipe_messages))
+            else:
+                # Save chat history to ~/.cache/chatglm/chat_history_yyyymmddHHMMSS.json without using PIPE.
+                result = chatglm.chat()
+            with open(os.path.join(chat_history_directory, filename), 'w') as f:
+                json.dump(result, f, indent=4, ensure_ascii=False)
+            print(f"ChatGLM: Chat history has been saved to {os.path.join(chat_history_directory, filename)}")
+        else:
+            # If user want to start chat mode, user can use chat, -c, or --chat as the parameter.
+            if not sys.stdin.isatty():
+                # If user want to load the chat history, send the chat history using PIPE, user can run using `cat /path/to/chat_history_yyyymmddHHMMSS.json | chatglm -c`
+                chatglm.chat(chat_history=json.loads(pipe_messages))
+            else:
+                # Start chat mode without using PIPE.
+                chatglm.chat()
+    elif len(params) == 1 or (len(params) == 2 and any(map(params.__contains__, tty_param))):
+        # If PIPE is used, ChatGLM will read the content from PIPE and then explain it.
+        if not sys.stdin.isatty():
+            # Read the content from PIPE and then explain it.
+            question = "Explain the following output:\n\n```" + sys.stdin.read() + "\n```"
+            reply = chatglm.answer(question)
+        else:
+            raise ValueError("Please use PIPE to send the content to ChatGLM if you do not use any other params.")
+    elif params[-1] not in chat_param and params[-1] not in save_param:
+        if not sys.stdin.isatty():
+            # Read the content from PIPE and then explain it.
+            question = params[-1] + "\n\n```" + pipe_messages + "\n```"
+            reply = chatglm.answer(question)
+        else:
+            # Reply without using PIPE.
+            reply = chatglm.answer(params[-1])
+    else:
+        raise ValueError("Invalid argument.")
+
+if __name__ == "__main__":
+    # Get the command line arguments.
+    params = sys.argv
+    # Execute the chatglm function.
+    exec_chatglm(params)
